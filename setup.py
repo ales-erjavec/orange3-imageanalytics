@@ -23,6 +23,16 @@ DESCRIPTION = 'Orange3 add-on for image data mining.'
 LONG_DESCRIPTION = ABOUT
 LICENSE = 'GPL3+'
 
+INSTALL_REQUIRES = [
+    "numpy>=1.10.0",
+    "Pillow>=2.7.0",
+    "hyper==0.7.0",
+    "requests",
+    "cachecontrol",
+    "lockfile",
+    "Orange3>=3.3.5",
+]
+
 CLASSIFIERS = [
     'Development Status :: 1 - Planning',
     'Intended Audience :: Education',
@@ -41,11 +51,6 @@ PACKAGES = find_packages()
 PACKAGE_DATA = {
     'orangecontrib.imageanalytics.widgets': ['icons/*.svg'],
 }
-
-INSTALL_REQUIRES = sorted(set(
-    line.partition('#')[0].strip()
-    for line in open(os.path.join(os.path.dirname(__file__), 'requirements.txt'))
-) - {''})
 
 ENTRY_POINTS = {
     'orange.widgets':
