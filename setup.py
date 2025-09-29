@@ -117,7 +117,7 @@ if __name__ == '__main__':
             "requests",
             "requests_cache",
             "scipy",
-            "onnxruntime",
+            "onnxruntime < 1.21",
             "more_itertools",
             "filelock",
             "huggingface_hub",
