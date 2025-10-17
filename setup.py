@@ -118,6 +118,7 @@ if __name__ == '__main__':
             "requests_cache",
             "scipy",
             "onnxruntime < 1.21",
+            "dlltracer; sys_platform=='win32'",
             "more_itertools",
             "filelock",
             "huggingface_hub",

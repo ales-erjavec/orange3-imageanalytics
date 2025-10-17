@@ -25,6 +25,15 @@ class TestOWImageEmbedding(WidgetTest):
     def setUp(self):
         super().setUp()
         self.widget = self.create_widget(OWImageEmbedding)
+        import sys
+        print("ARE YOU SEEING THIS!", file=sys.stdout)
+        if sys.platform == "win32":
+            import dlltracer, sys
+            print("ARE YOU SEEING THIS SHIT!", file=sys.stdout)
+            with dlltracer.Trace(out=sys.stdout):
+                import onnxruntime
+        import onnxruntime as ort
+
 
     def get_output(self, output=None, widget=None, wait=5000, check_error=True):
         w = widget or self.widget

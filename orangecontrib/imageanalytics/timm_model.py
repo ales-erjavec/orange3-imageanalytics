@@ -95,6 +95,11 @@ class TimmModel(ORTModel):
     ModelName: ClassVar[str]
 
     def __init__(self):
+        import sys
+        if sys.platform == "win32":
+            import dlltracer, sys
+            with dlltracer.Trace(out=sys.stderr):
+                import onnxruntime
         import onnxruntime as ort
         super().__init__(ort.InferenceSession(self.cached_model_path), self.ModelName)
 

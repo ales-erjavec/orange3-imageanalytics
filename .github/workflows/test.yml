@@ -4,10 +4,36 @@ on:
   push:
     branches:
       - master
+      - trace-ort
   pull_request:
     branches:
       - master
 
 jobs:
-  test:
-      uses: biolab/orange-ci-cd/.github/workflows/test-addons.yml@master
+#  test:
+#      uses: biolab/orange-ci-cd/.github/workflows/test-addons.yml@master
+
+  trace_onnxruntime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: python -m pip install onnxruntime==1.20.1 dlltracer
+      - name: Trace
+        shell: bash
+        run: |
+          python - <<EOF
+          import sys
+          import dlltracer as t
+          with t.Trace(out=sys.stdout):
+              import onnxruntime;
+          EOF
+          python -c"import onnxruntime"
+      - uses: actions/checkout@v4
+      - name: Test
+        shell: bash
+        run: |
+          python -m pip install PyQt6 -e ./
+          python -m unittest -v
