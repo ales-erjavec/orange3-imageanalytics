@@ -279,3 +279,11 @@ class Inception_Next_Atto(TimmModel):
 
 class Inception_Next_Tiny(TimmModel):
     ModelName = "inception_next_tiny.sail_in1k"
+
+
+class EfficientVit_b0(TimmModel):
+    ModelName = "efficientvit_b0.r224_in1k"
+
+
+class EfficientVit_b1(TimmModel):
+    ModelName = "efficientvit_b1.r224_in1k"

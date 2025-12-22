@@ -5,8 +5,9 @@ from Orange.data import ContinuousVariable, Domain, Table, Variable
 from Orange.misc.utils.embedder_utils import EmbedderCache
 from Orange.util import dummy_callback
 from orangecontrib.imageanalytics.timm_model import InceptionV3, \
-    InceptionV4, ResNet18, ResNet50, ConvNeXt_Small, ConvNeXt_Tiny, ConvNeXt_Atto, \
-    Inception_Next_Atto, Inception_Next_Tiny
+    InceptionV4, ResNet18, ResNet50, ConvNeXt_Small, ConvNeXt_Tiny, \
+    ConvNeXt_Atto, \
+    Inception_Next_Atto, Inception_Next_Tiny, EfficientVit_b0, EfficientVit_b1
 
 from orangecontrib.imageanalytics.local_embedder import LocalEmbedder
 from orangecontrib.imageanalytics.server_embedder import ServerEmbedder
@@ -159,6 +160,26 @@ MODELS = {
         "is_local": True,
         "batch_size": 16,
         "model": SqueezenetModel,
+    },
+    "efficientvit_b0-local": {
+        "name": "EfficientViT",
+        "description": "An EfficientViT (MIT) image classification model.\n"
+                       "Trained on ImageNet-1k by paper authors.",
+        "target_image_size": (224, 224),
+        "layers": ["penultimate"],
+        "order": 7,
+        "is_local": True,
+        "model": EfficientVit_b0,
+    },
+    "efficientvit_b1-local": {
+        "name": "EfficientViT",
+        "description": "An EfficientViT (MIT) image classification model.\n"
+                       "Trained on ImageNet-1k by paper authors.",
+        "target_image_size": (224, 224),
+        "layers": ["penultimate"],
+        "order": 7,
+        "is_local": True,
+        "model": EfficientVit_b1,
     },
 }
 
