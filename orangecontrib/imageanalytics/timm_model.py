@@ -5,10 +5,11 @@ Models are converted from timm torch models to float16 ONNX models.
 """
 from __future__ import annotations
 
+import multiprocessing
 import os
 import tempfile
 import json
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar
 
 import numpy as np
 import PIL.Image
@@ -16,6 +17,7 @@ import huggingface_hub
 
 from orangecanvas.utils import findf
 from Orange.misc.environ import data_dir
+from orangecontrib.imageanalytics import onnxrunner
 
 from orangecontrib.imageanalytics.utils import (
     classproperty, atomic_update, download_url_to_file
@@ -23,9 +25,6 @@ from orangecontrib.imageanalytics.utils import (
 from orangecontrib.imageanalytics.transforms import (
     Module, Resize, CenterCrop, MaybeToTensor, Normalize, Compose
 )
-
-if TYPE_CHECKING:
-    import onnxruntime as ort
 
 HF_REPO_ID = "ales-erjavec/embedders-onnx"  # test
 
@@ -55,12 +54,26 @@ class ORTModel(LocalEmbedderModel):
     #: The input data type
     dtype: np.float16
 
-    def __init__(self, model: str|ort.InferenceSession, name=None):
-        import onnxruntime as ort
-        if not isinstance(model, ort.InferenceSession):
-            model = ort.InferenceSession(model)
-        self.model = model
+    def __init__(self, model: str, name=None):
+        self.model_path = model
+        self._pool = None
         self.name = name
+
+    def __enter__(self):
+        if self._pool is None:
+            context = multiprocessing.get_context("spawn")
+            self._pool = context.Pool(
+                processes=1,
+                initializer=onnxrunner.Session.set_global_session,
+                initargs=(self.model_path,)
+            )
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self._pool is not None:
+            self._pool.close()
+            self._pool.join()
+            self._pool = None
 
     @classmethod
     def _create_transform(cls, cfg: dict[str, Any]) -> Module:
@@ -84,6 +97,19 @@ class ORTModel(LocalEmbedderModel):
     def predict(self, image: np.ndarray) -> np.ndarray:
         """
         Predict the image embeddings using the model.
+        Run inference within a new subprocess reusing the pool created during initialization.
+        """
+        if image.ndim == 3:
+            image = image[None, :]
+        image = image.astype(self.dtype)
+        _, embeddings = self._pool.apply(
+            onnxrunner.Session.global_session_run, (None, {"input": image})
+        )
+        return embeddings
+
+    def predict_(self, image: np.ndarray) -> np.ndarray:
+        """
+        Predict the image embeddings using the model.
         """
         if image.ndim == 3:
             image = image[None, :]
@@ -98,8 +124,7 @@ class TimmModel(ORTModel):
     ModelName: ClassVar[str]
 
     def __init__(self):
-        import onnxruntime as ort
-        super().__init__(ort.InferenceSession(self.cached_model_path), self.ModelName)
+        super().__init__(self.cached_model_path, self.ModelName)
         self._load_config()
 
     def _load_config(self):
