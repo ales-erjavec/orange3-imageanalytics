@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - master
+      - onnx-isolate
   pull_request:
     branches:
       - master
-
+  workflow_dispatch:
 jobs:
   test:
       uses: biolab/orange-ci-cd/.github/workflows/test-addons.yml@master
