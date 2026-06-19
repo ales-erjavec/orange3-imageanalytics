@@ -2,6 +2,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from Orange.data import ContinuousVariable, Domain, Table, Variable
+from Orange.data.util import SharedComputeValue
 from Orange.misc.utils.embedder_utils import EmbedderCache
 from Orange.util import dummy_callback
 from orangecontrib.imageanalytics.timm_model import InceptionV3, \
@@ -242,6 +243,7 @@ class ImageEmbedder:
         data: Union[Table, List[str], np.array],
         col: Optional[Union[str, Variable]] = None,
         callback: Optional[Callable] = dummy_callback,
+        enable_domain_transform: bool = False,
     ) -> Union[Tuple[Table, Table, int], List[List[float]]]:
         """
         Embedd images.
@@ -258,6 +260,9 @@ class ImageEmbedder:
         callback
             Optional callback - function that is called for every embedded
             image and is used to report the progress.
+        enable_domain_transform: bool
+            If `True` record the transform in the resulting tables domain
+            (see `Variable.compute_value`)
 
         Returns
         -------
@@ -273,7 +278,8 @@ class ImageEmbedder:
         if isinstance(data, Table):
             assert col is not None, "Please provide a column for image path"
             # if table on input tables on output
-            return self.from_table(data, col=col, callback=callback)
+            return self.from_table(data, col=col, callback=callback,
+                                   enable_domain_transform=enable_domain_transform)
         elif isinstance(data, (np.ndarray, list)):
             # if array-like on input array-like on output
             return self._embedder.embedd_data(data, callback=callback)
@@ -283,6 +289,7 @@ class ImageEmbedder:
         data: Table,
         col: Union[str, Variable] = "image",
         callback: Callable = None,
+        enable_domain_transform=False,
     ) -> Tuple[Table, Table, int]:
         """
         Calls embedding when data are provided as a Orange Table.
@@ -296,10 +303,19 @@ class ImageEmbedder:
         callback
             Optional callback - function that is called for every embedded
             image and is used to report the progress.
+        enable_domain_transform: bool
+            If `True` record the transform in the resulting tables domain
+            (see `Variable.compute_value`)
         """
         file_paths = extract_paths(data, data.domain[col])
-        embeddings_ = self._embedder.embedd_data(file_paths, callback=callback)
-        return ImageEmbedder.prepare_output_data(data, embeddings_)
+        embeddings = self._embedder.embedd_data(file_paths, callback=callback)
+        shared_compute = None
+        dims = max((len(e) for e in embeddings if e is not None), default=0)
+        if enable_domain_transform and dims:
+            shared_compute = ImageEmbedderTransform.Embedder(
+                self.model, data.domain[col].name, dims
+            )
+        return ImageEmbedder.prepare_output_data(data, embeddings, shared_compute=shared_compute)
 
     def __enter__(self) -> "ImageEmbedder":
         return self
@@ -312,7 +328,8 @@ class ImageEmbedder:
 
     @staticmethod
     def construct_output_data_table(
-            embedded_images: Table, embeddings_: np.ndarray
+            embedded_images: Table, embeddings_: np.ndarray,
+            shared_compute: Optional['ImageEmbedderTransform.Embedder'] = None
     ) -> Table:
         """
         Join the orange table with embeddings.
@@ -323,32 +340,32 @@ class ImageEmbedder:
             Table with images that were successfully embedded
         embeddings_
             Embeddings for images from table
+        shared_compute
 
         Returns
         -------
         Table with added embeddings to data.
         """
         new_attributes = [
-            ContinuousVariable("n{:d}".format(d)) for d in range(embeddings_.shape[1])
+            ContinuousVariable(
+                "n{:d}".format(i),
+                compute_value=ImageEmbedderTransform(shared_compute, i) if shared_compute else None
+            )
+            for i in range(embeddings_.shape[1])
         ]
+
         # prevent embeddings to be shown in long drop-downs in e.g. scatterplot
         for a in new_attributes:
             a.attributes["hidden"] = True
 
-        domain_new = Domain(
-            list(embedded_images.domain.attributes) + new_attributes,
-            embedded_images.domain.class_vars,
-            embedded_images.domain.metas,
-        )
-        table = embedded_images.transform(domain_new)
-        with table.unlocked(table.X):  # writing to fresh part, can be unlocked
-            table[:, new_attributes] = embeddings_
-
-        return table
+        embeddings_table = embedded_images.from_numpy(Domain(new_attributes), embeddings_)
+        return embedded_images.concatenate([embedded_images, embeddings_table], axis=1)
 
     @staticmethod
     def prepare_output_data(
-        input_data: Table, embeddings_: List[List[float]]
+            input_data: Table,
+            embeddings_: List[List[float]],
+            shared_compute: Optional['ImageEmbedderTransform.Embedder']=None
     ) -> Tuple[Table, Table, int]:
         """
         Prepare output data when data table on input.
@@ -359,7 +376,7 @@ class ImageEmbedder:
             The table with original data that are joined with embeddings
         embeddings_
             List with embeddings
-
+        shared_compute
         Returns
         -------
         Tuple where first parameter is table with embedded images, the second
@@ -386,7 +403,7 @@ class ImageEmbedder:
             embeddings_ = np.vstack(embeddings_)
 
             embedded_images = ImageEmbedder.construct_output_data_table(
-                embedded_images, embeddings_
+                embedded_images, embeddings_, shared_compute=shared_compute
             )
             embedded_images.ids = input_data.ids[embedded_images_bool]
             embedded_images.name = "Embedded images"
@@ -410,9 +427,49 @@ class ImageEmbedder:
             cache.clear_cache()
 
 
+class ImageEmbedderTransform(SharedComputeValue):
+    class Embedder:
+        def __init__(self, model: str, image_var_name: str, embedding_dim: int):
+            self.model = model
+            self.image_var_name = image_var_name
+            self.embedding_dim = embedding_dim
+
+        def __call__(self, table: Table):
+            embedder = ImageEmbedder(self.model)
+            paths = extract_paths(table, table.domain[self.image_var_name])
+            emb = embedder(paths)
+            # Replace empty results with nan
+            nanv = [np.nan] * self.embedding_dim
+            emb = [e if e is not None else nanv for e in emb]
+            emb = np.array(emb)
+            return emb
+
+        def __hash__(self):
+            return hash((self.model, self.image_var_name, self.embedding_dim))
+
+        def __eq__(self, other):
+            return (type(other) is ImageEmbedderTransform.Embedder
+                    and self.model == other.model
+                    and self.image_var_name == other.image_var_name
+                    and self.embedding_dim == other.embedding_dim)
+
+    def __init__(self, compute_shared: Embedder, index: int):
+        super().__init__(compute_shared)
+        self.index = index
+
+    def compute(self, data: Table, shared_data: np.ndarray):
+        return shared_data[:, self.index]
+
+    def __hash__(self):
+        return hash((super().__hash__(), self.index))
+
+    def __eq__(self, other):
+        return super().__eq__(other) and self.index == other.index
+
+
 if __name__ == "__main__":
     image_file_paths = ["tests/test_images/example_image_0.jpg"]
     # with ImageEmbedder(model='inception-v3') as embedder:
-    with ImageEmbedder(model="squeezenet") as embedder:
-        embedder.clear_cache()
-        print(embedder(image_file_paths))
+    with ImageEmbedder(model="squeezenet") as embedder_:
+        embedder_.clear_cache()
+        print(embedder_(image_file_paths))

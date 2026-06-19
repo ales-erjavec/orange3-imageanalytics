@@ -74,7 +74,7 @@ def run_embedding(
         state.set_progress_value(s * 100)
 
     try:
-        emb, skip, n_skip = embedder(images, col=file_paths_attr, callback=callback)
+        emb, skip, n_skip = embedder(images, col=file_paths_attr, callback=callback, enable_domain_transform=True)
     except EmbeddingConnectionError:
         state.set_partial_result("squeezenet")
         embedder = ImageEmbedder(model="squeezenet")

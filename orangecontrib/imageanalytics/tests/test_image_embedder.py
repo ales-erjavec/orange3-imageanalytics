@@ -3,13 +3,14 @@ import logging
 import unittest
 from os import environ, path
 from os.path import dirname, join
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import numpy as np
 from numpy.testing import assert_array_equal
 
-from Orange.data import Domain, StringVariable, Table
-from orangecontrib.imageanalytics.image_embedder import ImageEmbedder
+from Orange.data import Domain, StringVariable, Table, ContinuousVariable
+from Orange.data.util import SharedComputeValue
+from orangecontrib.imageanalytics.image_embedder import ImageEmbedder, ImageEmbedderTransform
 
 HTTPX_POST_METHOD = "httpx.AsyncClient.post"
 _TESTED_MODULE = (
@@ -291,6 +292,238 @@ class ImageEmbedderTest(unittest.TestCase):
         self.assertIsNone(emb)
         self.assertEqual(len(self.data_table), len(skip))
         self.assertEqual(len(self.data_table), num_skip)
+
+
+class DomainTransformTest(unittest.TestCase):
+
+    def setUp(self):
+        logging.disable(logging.CRITICAL)
+        self.embedder_local = ImageEmbedder(model="squeezenet")
+        self.embedder_local.clear_cache()
+
+        str_var = StringVariable("Image")
+        str_var.attributes["origin"] = path.dirname(path.abspath(__file__))
+        self.data_table = Table.from_numpy(
+            Domain([], [], metas=[str_var]),
+            np.empty((3, 0)),
+            np.empty((3, 0)),
+            metas=np.array(
+                [
+                    [_EXAMPLE_IMAGE_JPG],
+                    [_EXAMPLE_IMAGE_TIFF],
+                    [_EXAMPLE_IMAGE_GRAYSCALE],
+                ]
+            ),
+        )
+
+    def tearDown(self):
+        if hasattr(self.embedder_local, '_embedder') and self.embedder_local._embedder:
+            if hasattr(self.embedder_local._embedder, 'clear_cache'):
+                self.embedder_local._embedder.clear_cache()
+        logging.disable(logging.NOTSET)
+
+    def test_domain_transform_disabled_no_compute_value(self):
+        """When enable_domain_transform is False (default), variables have no compute_value."""
+        emb, skipped, num_skipped = self.embedder_local(
+            self.data_table, col="Image", enable_domain_transform=False
+        )
+
+        self.assertIsNone(skipped)
+        self.assertEqual(0, num_skipped)
+
+        for var in emb.domain.variables:
+            if var.name.startswith("n"):
+                self.assertIsNone(
+                    var.compute_value,
+                    f"Variable {var.name} should not have compute_value when "
+                    "enable_domain_transform=False"
+                )
+
+    def test_domain_transform_enabled_has_compute_value(self):
+        """When enable_domain_transform is True, embedding variables have compute_value."""
+        emb, skipped, num_skipped = self.embedder_local(
+            self.data_table, col="Image", enable_domain_transform=True
+        )
+
+        self.assertIsNone(skipped)
+        self.assertEqual(0, num_skipped)
+
+        embedding_vars = [v for v in emb.domain.variables if v.name.startswith("n")]
+        self.assertEqual(len(embedding_vars), 1000)
+        self.assertEqual(emb.X.shape[1], 1000)
+
+        for var in embedding_vars:
+            self.assertIsInstance(var, ContinuousVariable)
+            self.assertIsNotNone(var.compute_value)
+            self.assertIsInstance(var.compute_value, ImageEmbedderTransform)
+
+            self.assertEqual(var.compute_value.compute_shared.model, "squeezenet")
+            self.assertEqual(var.compute_value.compute_shared.image_var_name, "Image")
+            self.assertEqual(var.compute_value.compute_shared.embedding_dim, 1000)
+
+            self.assertTrue(var.attributes.get("hidden", False))
+
+    def test_domain_transform_all_skipped_no_compute_value(self):
+        """When all images are skipped (dims=0), no compute_value even with enable_domain_transform=True."""
+        data = self.data_table.copy()
+        with data.unlocked():
+            data.metas[:, 0] = ["invalid_path_1", "invalid_path_2", "invalid_path_3"]
+
+        emb, skipped, num_skipped = self.embedder_local(
+            data, col="Image", enable_domain_transform=True
+        )
+
+        self.assertIsNone(emb)
+        self.assertIsNotNone(skipped)
+        self.assertEqual(3, num_skipped)
+
+    def test_domain_transform_some_skipped_has_compute_value(self):
+        """When some images are skipped, remaining ones still have compute_value."""
+        data = self.data_table.copy()
+        with data.unlocked():
+            data.metas[1, 0] = "invalid_path"
+
+        emb, skipped, num_skipped = self.embedder_local(
+            data, col="Image", enable_domain_transform=True
+        )
+
+        self.assertIsNotNone(emb)
+        self.assertIsNotNone(skipped)
+        self.assertEqual(1, num_skipped)
+        self.assertEqual(2, len(emb))
+        embedding_vars = [v for v in emb.domain.variables if v.name.startswith("n")]
+
+        for var in embedding_vars:
+            self.assertIsNotNone(var.compute_value)
+
+    def test_domain_transform_on_unknown_data(self):
+        """When some images are skipped, remaining ones still have valid embeddings."""
+        data = self.data_table.copy()
+        with data.unlocked():
+            data.metas[1, 0] = "invalid_path"
+
+        emb, skipped, num_skipped = self.embedder_local(
+            data, col="Image", enable_domain_transform=True
+        )
+        embedding_vars = [v for v in emb.domain.variables if v.name.startswith("n")]
+
+        for var in embedding_vars:
+            self.assertIsNotNone(var.compute_value)
+
+        emb = data.transform(Domain([emb.domain["n0"]]))
+        col = emb.get_column(0)
+        self.assertTrue(np.isnan(col[1]))
+        self.assertFalse(np.isnan(col[0]) or np.isnan(col[2]))
+
+    def test_domain_transform_compute_value_produces_correct_results(self):
+        """The compute_value should produce values matching the actual embeddings."""
+        emb, skipped, num_skipped = self.embedder_local(
+            self.data_table, col="Image", enable_domain_transform=True
+        )
+        emb_t = self.data_table.transform(emb.domain)
+        for i in range(3):
+            var_name = f"n{i}"
+            var = emb.domain[var_name]
+            computed = var.compute_value(emb)
+            assert_array_equal(computed, emb.X[:, i])
+            assert_array_equal(emb_t.get_column(var), emb.X[:, i])
+
+
+class ImageEmbedderTransformTest(unittest.TestCase):
+    def test_embedder_equality_same_params(self):
+        """Two Embedders with same params should be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+
+        self.assertEqual(e1, e2)
+        self.assertEqual(hash(e1), hash(e2))
+
+        self.assertEqual(e1, e1)
+        self.assertEqual(hash(e1), hash(e1))
+
+    def test_embedder_inequality_different_model(self):
+        """Two Embedders with different model should not be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("inception-v3-local", "Image", 1000)
+
+        self.assertNotEqual(e1, e2)
+        self.assertNotEqual(hash(e1), hash(e2))
+
+    def test_embedder_inequality_different_image_var(self):
+        """Two Embedders with different image_var_name should not be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("squeezenet", "FilePath", 1000)
+
+        self.assertNotEqual(e1, e2)
+        self.assertNotEqual(hash(e1), hash(e2))
+
+
+    def test_embedder_inequality_different_dim(self):
+        """Two Embedders with different embedding_dim should not be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 2048)
+
+        self.assertNotEqual(e1, e2)
+        self.assertNotEqual(hash(e1), hash(e2))
+
+    def test_embedder_inequality_different_type(self):
+        """Embedder should not be equal to a different type."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        self.assertNotEqual(e1, "not an embedder")
+        self.assertNotEqual(e1, None)
+        self.assertNotEqual(e1, 42)
+
+    def test_transform_equality_same_params(self):
+        """Two transforms with same params should be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+
+        t1 = ImageEmbedderTransform(e1, 0)
+        t2 = ImageEmbedderTransform(e2, 0)
+
+        self.assertEqual(t1, t2)
+        self.assertEqual(hash(t1), hash(t2))
+
+        self.assertEqual(t1, t1)
+        self.assertEqual(hash(t1), hash(t1))
+
+    def test_transform_inequality_different_index(self):
+        """Two transforms with different index should not be equal."""
+        e = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+
+        t1 = ImageEmbedderTransform(e, 0)
+        t2 = ImageEmbedderTransform(e, 1)
+
+        self.assertNotEqual(t1, t2)
+        self.assertNotEqual(hash(t1), hash(t2))
+
+    def test_transform_inequality_different_embedder(self):
+        """Two transforms with different embedder should not be equal."""
+        e1 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 1000)
+        e2 = ImageEmbedderTransform.Embedder("squeezenet", "Image", 500)
+
+        t1 = ImageEmbedderTransform(e1, 0)
+        t2 = ImageEmbedderTransform(e2, 0)
+
+        self.assertNotEqual(t1, t2)
+        self.assertNotEqual(hash(t1), hash(t2))
+
+    def test_transform_is_shared_compute_value(self):
+        """ImageEmbedderTransform should be a subclass of SharedComputeValue."""
+        self.assertTrue(issubclass(ImageEmbedderTransform, SharedComputeValue))
+
+    def test_transform_compute_returns_correct_column(self):
+        """Transform.compute should return the correct column from shared data."""
+        e = ImageEmbedderTransform.Embedder("squeezenet", "Image", 3)
+        t = ImageEmbedderTransform(e, 1)
+
+        mock_data = MagicMock()
+        shared_data = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
+
+        result = t.compute(mock_data, shared_data)
+
+        expected = np.array([2.0, 5.0, 8.0])
+        np.testing.assert_array_equal(result, expected)
 
 
 if __name__ == "__main__":
