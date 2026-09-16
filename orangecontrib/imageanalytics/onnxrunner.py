@@ -31,6 +31,9 @@ class Session:
 
     def run(self, *args) -> tuple[np.ndarray]:
         if self.model is None:
+            import os
+            # https://github.com/microsoft/onnxruntime/blob/main/docs/Privacy.md
+            os.environ["ORT_DISABLE_TELEMETRY"] = "1"
             import onnxruntime as ort
             self.model = ort.InferenceSession(self.model_path)
         return self.model.run(*args)
